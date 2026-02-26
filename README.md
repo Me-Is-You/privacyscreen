@@ -22,12 +22,6 @@ You can download the pre-compiled binaries for Windows from the [Releases](https
 
 Ensure you have one of the following toolchains installed:
 
-#### Rust Implementation
-```bash
-cargo build --release
-```
-The binary will be located at `target/release/privscrn.exe`.
-
 #### Zig Implementation
 Tested with Zig 0.15.2.
 ```bash
