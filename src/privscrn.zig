@@ -9,6 +9,8 @@ const Config = struct {
     left_bias: ?f32 = null,
     right_bias: ?f32 = null,
     invert: bool = false,
+    stripe_width: u32 = 0,
+    stripe_opacity: f32 = 0.8,
 };
 
 const Shape = enum {
@@ -304,13 +306,15 @@ fn createVignetteWindows(allocator: std.mem.Allocator, config: Config) !void {
 }
 
 fn calculateVignetteFactor(dx: f32, dy: f32, center_x: f32, center_y: f32, config: Config) f32 {
-    const eff_dx = if (config.left_bias) |bias| blk: {
+    var eff_dx = dx;
+    if (config.left_bias) |bias| {
         const multiplier = if (bias == 0.0) 0.2 else bias;
-        break :blk dx + center_x * multiplier;
-    } else if (config.right_bias) |bias| blk: {
+        eff_dx += center_x * multiplier;
+    }
+    if (config.right_bias) |bias| {
         const multiplier = if (bias == 0.0) 0.2 else bias;
-        break :blk dx - center_x * multiplier;
-    } else dx;
+        eff_dx -= center_x * multiplier;
+    }
 
     var normalized_dist = switch (config.shape) {
         .circle => blk: {
@@ -391,8 +395,18 @@ fn drawVignetteWindows(hwnd: windows.HWND, width: u32, height: u32, xpos: i32, y
         while (x < width) : (x += 1) {
             const dx = @as(f32, @floatFromInt(x)) - center_x;
             const dy = @as(f32, @floatFromInt(y)) - center_y;
-            const factor = calculateVignetteFactor(dx, dy, center_x, center_y, config);
-            const alpha: u8 = @intFromFloat(factor * config.max_alpha * 255.0);
+
+            const vignette_factor = calculateVignetteFactor(dx, dy, center_x, center_y, config);
+
+            var final_alpha: f32 = vignette_factor * config.max_alpha;
+            if (config.stripe_width > 0) {
+                const in_stripe = (@mod(x, config.stripe_width * 2) < config.stripe_width);
+                if (in_stripe) {
+                    final_alpha = @min(final_alpha + config.stripe_opacity, 1.0);
+                }
+            }
+
+            const alpha: u8 = @intFromFloat(final_alpha * 255.0);
             const premul: u8 = 0;
             const bgra = (@as(u32, alpha) << 24) | (@as(u32, premul) << 16) |
                 (@as(u32, premul) << 8) | premul;
@@ -427,13 +441,15 @@ fn printHelp(prog_name: []const u8) !void {
         \\Usage: {s} [OPTIONS]
         \\
         \\Options:
-        \\  -f, --falloff <VALUE>       Fall-off power for vignette curve (default: 4.0)
-        \\  -o, --opacity <VALUE>       Maximum edge opacity, 0.0-1.0 (default: 0.3)
-        \\  -s, --shape <VALUE>         Shape: circle, rectangle, diamond, elliptical (default: elliptical)
-        \\  -t, --type <VALUE>          Falloff: power, exponential, gaussian, smoothers
-        \\  -l, --left-bias [VALUE]     Darken left side more (default: 0.2 if no value)
-        \\  -r, --right-bias [VALUE]    Darken right side more (default: 0.2 if no value)
-        \\  -i, --invert                Darken from center instead of edges
+        \\  -f, --falloff <VALUE>        Fall-off power for vignette curve (default: 4.0)
+        \\  -o, --opacity <VALUE>        Maximum edge opacity, 0.0-1.0 (default: 0.3)
+        \\  -s, --shape <VALUE>          Shape: circle, rectangle, diamond, elliptical (default: elliptical)
+        \\  -t, --type <VALUE>           Falloff: power, exponential, gaussian, smoothers
+        \\  -l, --left-bias [VALUE]      Darken left side more (default: 0.2 if no value)
+        \\  -r, --right-bias [VALUE]     Darken right side more (default: 0.2 if no value)
+        \\  -w, --stripe-width <VALUE>   Venetian blind stripe width in pixels (default: 0/disabled)
+        \\  -p, --stripe-opacity <VALUE> Stripe darkness, 0.0-1.0 (default: 0.8)
+        \\  -i, --invert                 Darken from center instead of edges
         \\
     , .{prog_name});
 }
@@ -510,6 +526,26 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             } else {
                 config.right_bias = 0.2;
             }
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--stripe-width")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --stripe-width requires a value\n", .{});
+                std.process.exit(1);
+            }
+            config.stripe_width = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Error: invalid stripe-width value: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--stripe-opacity")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --stripe-opacity requires a value\n", .{});
+                std.process.exit(1);
+            }
+            config.stripe_opacity = std.fmt.parseFloat(f32, args[i]) catch {
+                std.debug.print("Error: invalid stripe-opacity value: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--invert")) {
             config.invert = true;
         } else {
@@ -565,6 +601,12 @@ pub fn main() !void {
     if (config.right_bias) |bias| {
         try message.appendSlice(allocator, ", right bias: ");
         try writer.print("{d}", .{bias});
+    }
+    if (config.stripe_width > 0) {
+        try message.appendSlice(allocator, ", stripe width: ");
+        try writer.print("{d}", .{config.stripe_width});
+        try message.appendSlice(allocator, ", stripe opacity: ");
+        try writer.print("{d}", .{config.stripe_opacity});
     }
     if (config.invert) {
         try message.appendSlice(allocator, ", invert: true");
