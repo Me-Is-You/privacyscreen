@@ -382,12 +382,14 @@ fn drawVignetteWindows(hwnd: windows.HWND, width: u32, height: u32, xpos: i32, y
 
     var bits_ptr: ?*anyopaque = null;
     const dib = windows.CreateDIBSection(screen_dc, &bmi, windows.DIB_RGB_COLORS, &bits_ptr, null, 0) orelse return error.CreateDIBFailed;
+    if (bits_ptr == null) return error.CreateDIBFailed;
     defer _ = windows.DeleteObject(dib);
 
     const old_bmp = windows.SelectObject(mem_dc, dib);
     defer _ = windows.SelectObject(mem_dc, old_bmp.?);
 
-    const bits = @as([*]u32, @ptrCast(@alignCast(bits_ptr)))[0..(width * height)];
+    const pixel_count: usize = @as(usize, width) * @as(usize, height);
+    const bits = @as([*]u32, @ptrCast(@alignCast(bits_ptr)))[0..pixel_count];
 
     var y: u32 = 0;
     while (y < height) : (y += 1) {
