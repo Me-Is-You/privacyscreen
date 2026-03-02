@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Config = struct {
+    mode: Mode = .vignette,
+    // vignette fields
     falloff: f32 = 4.0,
     max_alpha: f32 = 0.3,
     shape: Shape = .elliptical,
@@ -11,6 +13,22 @@ const Config = struct {
     invert: bool = false,
     stripe_width: u32 = 0,
     stripe_opacity: f32 = 0.8,
+    // pixel mask fields
+    mask_pattern: MaskPattern = .checkerboard,
+    mask_size: u32 = 2,
+    mask_opacity: f32 = 0.55,
+};
+
+const Mode = enum {
+    vignette,
+    pixel,
+};
+
+const MaskPattern = enum {
+    checkerboard,
+    vertical,
+    horizontal,
+    diagonal,
 };
 
 const Shape = enum {
@@ -297,7 +315,10 @@ fn createVignetteWindows(allocator: std.mem.Allocator, config: Config) !void {
             null,
         ) orelse continue;
 
-        try drawVignetteWindows(hwnd, @intCast(mon.width), @intCast(mon.height), mon.x, mon.y, config);
+        drawVignetteWindows(hwnd, @intCast(mon.width), @intCast(mon.height), mon.x, mon.y, config) catch |err| {
+            std.debug.print("Failed to draw on monitor: {}\n", .{err});
+            continue;
+        };
     }
 
     const event = windows.CreateEventW(null, 0, 0, null) orelse return error.CreateEventFailed;
@@ -398,20 +419,31 @@ fn drawVignetteWindows(hwnd: windows.HWND, width: u32, height: u32, xpos: i32, y
             const dx = @as(f32, @floatFromInt(x)) - center_x;
             const dy = @as(f32, @floatFromInt(y)) - center_y;
 
-            const vignette_factor = calculateVignetteFactor(dx, dy, center_x, center_y, config);
+            const alpha: u8 = switch (config.mode) {
+                .vignette => blk: {
+                    const vignette_factor = calculateVignetteFactor(dx, dy, center_x, center_y, config);
+                    var final_alpha: f32 = vignette_factor * config.max_alpha;
 
-            var final_alpha: f32 = vignette_factor * config.max_alpha;
-            if (config.stripe_width > 0) {
-                const in_stripe = (@mod(x, config.stripe_width * 2) < config.stripe_width);
-                if (in_stripe) {
-                    final_alpha = @min(final_alpha + config.stripe_opacity, 1.0);
-                }
-            }
+                    if (config.stripe_width > 0) {
+                        const in_stripe = (@mod(x, config.stripe_width * 2) < config.stripe_width);
+                        if (in_stripe) {
+                            final_alpha = @min(final_alpha + config.stripe_opacity, 1.0);
+                        }
+                    }
+                    break :blk @intFromFloat(final_alpha * 255.0);
+                },
+                .pixel => blk: {
+                    const masked = switch (config.mask_pattern) {
+                        .checkerboard => (x / config.mask_size + y / config.mask_size) % 2 == 0,
+                        .vertical => (x / config.mask_size) % 2 == 0,
+                        .horizontal => (y / config.mask_size) % 2 == 0,
+                        .diagonal => ((x + y) / config.mask_size) % 2 == 0,
+                    };
+                    break :blk if (masked) @intFromFloat(config.mask_opacity * 255.0) else 0;
+                },
+            };
 
-            const alpha: u8 = @intFromFloat(final_alpha * 255.0);
-            const premul: u8 = 0;
-            const bgra = (@as(u32, alpha) << 24) | (@as(u32, premul) << 16) |
-                (@as(u32, premul) << 8) | premul;
+            const bgra = (@as(u32, alpha) << 24);
             bits[y * width + x] = bgra;
         }
     }
@@ -436,24 +468,51 @@ fn handleSignal(_: c_int) callconv(.C) void {
     should_quit.store(true, .monotonic);
 }
 
-fn printHelp(prog_name: []const u8) !void {
-    try stdoutPrint(
-        \\Privacy screen vignette overlay
-        \\
-        \\Usage: {s} [OPTIONS]
-        \\
-        \\Options:
-        \\  -f, --falloff <VALUE>        Fall-off power for vignette curve (default: 4.0)
-        \\  -o, --opacity <VALUE>        Maximum edge opacity, 0.0-1.0 (default: 0.3)
-        \\  -s, --shape <VALUE>          Shape: circle, rectangle, diamond, elliptical (default: elliptical)
-        \\  -t, --type <VALUE>           Falloff: power, exponential, gaussian, smoothers
-        \\  -l, --left-bias [VALUE]      Darken left side more (default: 0.2 if no value)
-        \\  -r, --right-bias [VALUE]     Darken right side more (default: 0.2 if no value)
-        \\  -w, --stripe-width <VALUE>   Venetian blind stripe width in pixels (default: 0/disabled)
-        \\  -p, --stripe-opacity <VALUE> Stripe darkness, 0.0-1.0 (default: 0.8)
-        \\  -i, --invert                 Darken from center instead of edges
-        \\
-    , .{prog_name});
+fn printHelp(prog_name: []const u8, mode: ?Mode) !void {
+    if (mode == null) {
+        try stdoutPrint(
+            \\Privacy screen overlay
+            \\
+            \\Usage: {s} <vig|pix> [OPTIONS]
+            \\
+            \\Commands:
+            \\  vig, vignette  Vignette overlay
+            \\  pix, pixel     Pixel masking overlay
+            \\
+            \\Run '{s} <command> --help' for mode-specific options.
+            \\
+        , .{ prog_name, prog_name });
+    } else if (mode.? == .vignette) {
+        try stdoutPrint(
+            \\Vignette Mode
+            \\
+            \\Usage: {s} vig [OPTIONS]
+            \\
+            \\Options:
+            \\  -f, --falloff <VALUE>        Fall-off power (default: 4.0)
+            \\  -o, --opacity <VALUE>        Edge opacity 0.0-1.0 (default: 0.3)
+            \\  -s, --shape <VALUE>          circle|rectangle|diamond|elliptical (default: elliptical)
+            \\  -t, --type <VALUE>           power|exponential|gaussian|smootherstep (default: smootherstep)
+            \\  -l, --left-bias [VALUE]      Darken left side (default: 0.2)
+            \\  -r, --right-bias [VALUE]     Darken right side (default: 0.2)
+            \\  -W, --stripe-width <VALUE>   Stripe width in px (default: 0)
+            \\  -S, --stripe-opacity <VALUE> Stripe opacity 0.0-1.0 (default: 0.8)
+            \\  -i, --invert                 Invert effect
+            \\
+        , .{prog_name});
+    } else {
+        try stdoutPrint(
+            \\Pixel Mask Mode
+            \\
+            \\Usage: {s} pix [OPTIONS]
+            \\
+            \\Options:
+            \\  -p, --pattern <VALUE>        checkerboard|vertical|horizontal|diagonal (default: checkerboard)
+            \\  -s, --size <VALUE>           Pattern size in px (default: 2)
+            \\  -o, --opacity <VALUE>        Mask opacity 0.0-1.0 (default: 0.55)
+            \\
+        , .{prog_name});
+    }
 }
 
 fn parseArgs(allocator: std.mem.Allocator) !Config {
@@ -463,13 +522,46 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
     var config = Config{};
 
     var i: usize = 1;
+
+    if (i < args.len and (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help"))) {
+        try printHelp(args[0], null);
+        std.process.exit(0);
+    }
+
+    if (i < args.len) {
+        const cmd = args[i];
+        if (std.mem.eql(u8, cmd, "vig") or std.mem.eql(u8, cmd, "vignette")) {
+            config.mode = .vignette;
+            i += 1;
+            if (i < args.len and (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help"))) {
+                try printHelp(args[0], .vignette);
+                std.process.exit(0);
+            }
+        } else if (std.mem.eql(u8, cmd, "pix") or std.mem.eql(u8, cmd, "pixel")) {
+            config.mode = .pixel;
+            i += 1;
+            if (i < args.len and (std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "--help"))) {
+                try printHelp(args[0], .pixel);
+                std.process.exit(0);
+            }
+        } else {
+            std.debug.print("Error: unknown command: {s}\n", .{cmd});
+            try printHelp(args[0], null);
+            std.process.exit(1);
+        }
+    }
+
+    const is_vignette = config.mode == .vignette;
+    const is_pixel = config.mode == .pixel;
+
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            try printHelp(args[0]);
-            std.process.exit(0);
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--falloff")) {
+        if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--falloff")) {
             i += 1;
+            if (is_pixel) {
+                std.debug.print("Error: '{s}' is only valid for vignette mode\n", .{arg});
+                std.process.exit(1);
+            }
             if (i >= args.len) {
                 std.debug.print("Error: --falloff requires a value\n", .{});
                 std.process.exit(1);
@@ -478,17 +570,28 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
                 std.debug.print("Error: invalid falloff value: {s}\n", .{args[i]});
                 std.process.exit(1);
             };
-        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--opacity")) {
+        } else if (std.mem.eql(u8, arg, "-s")) {
             i += 1;
             if (i >= args.len) {
-                std.debug.print("Error: --opacity requires a value\n", .{});
+                std.debug.print("Error: -s requires a value\n", .{});
                 std.process.exit(1);
             }
-            config.max_alpha = std.fmt.parseFloat(f32, args[i]) catch {
-                std.debug.print("Error: invalid opacity value: {s}\n", .{args[i]});
+            if (is_vignette) {
+                config.shape = std.meta.stringToEnum(Shape, args[i]) orelse {
+                    std.debug.print("Error: invalid shape: {s}\n", .{args[i]});
+                    std.process.exit(1);
+                };
+            } else {
+                config.mask_size = std.fmt.parseInt(u32, args[i], 10) catch {
+                    std.debug.print("Error: invalid size: {s}\n", .{args[i]});
+                    std.process.exit(1);
+                };
+            }
+        } else if (std.mem.eql(u8, arg, "--shape")) {
+            if (is_pixel) {
+                std.debug.print("Error: '--shape' is only valid for vignette mode\n", .{});
                 std.process.exit(1);
-            };
-        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--shape")) {
+            }
             i += 1;
             if (i >= args.len) {
                 std.debug.print("Error: --shape requires a value\n", .{});
@@ -498,8 +601,26 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
                 std.debug.print("Error: invalid shape: {s}\n", .{args[i]});
                 std.process.exit(1);
             };
+        } else if (std.mem.eql(u8, arg, "--size")) {
+            if (is_vignette) {
+                std.debug.print("Error: '--size' is only valid for pixel mode\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --size requires a value\n", .{});
+                std.process.exit(1);
+            }
+            config.mask_size = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Error: invalid size: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--type")) {
             i += 1;
+            if (is_pixel) {
+                std.debug.print("Error: '{s}' is only valid for vignette mode\n", .{arg});
+                std.process.exit(1);
+            }
             if (i >= args.len) {
                 std.debug.print("Error: --type requires a value\n", .{});
                 std.process.exit(1);
@@ -528,7 +649,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             } else {
                 config.right_bias = 0.2;
             }
-        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--stripe-width")) {
+        } else if (std.mem.eql(u8, arg, "-W") or std.mem.eql(u8, arg, "--stripe-width")) {
+            if (is_pixel) {
+                std.debug.print("Error: '{s}' is only valid for vignette mode\n", .{arg});
+                std.process.exit(1);
+            }
             i += 1;
             if (i >= args.len) {
                 std.debug.print("Error: --stripe-width requires a value\n", .{});
@@ -538,7 +663,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
                 std.debug.print("Error: invalid stripe-width value: {s}\n", .{args[i]});
                 std.process.exit(1);
             };
-        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--stripe-opacity")) {
+        } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--stripe-opacity")) {
+            if (is_pixel) {
+                std.debug.print("Error: '{s}' is only valid for vignette mode\n", .{arg});
+                std.process.exit(1);
+            }
             i += 1;
             if (i >= args.len) {
                 std.debug.print("Error: --stripe-opacity requires a value\n", .{});
@@ -550,25 +679,50 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             };
         } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--invert")) {
             config.invert = true;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pattern")) {
+            if (is_vignette) {
+                std.debug.print("Error: '{s}' is only valid for pixel mode\n", .{arg});
+                std.process.exit(1);
+            }
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --pattern requires a value\n", .{});
+                std.process.exit(1);
+            }
+            config.mask_pattern = std.meta.stringToEnum(MaskPattern, args[i]) orelse {
+                std.debug.print("Error: invalid mask pattern: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--opacity")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --opacity requires a value\n", .{});
+                std.process.exit(1);
+            }
+            const val = std.fmt.parseFloat(f32, args[i]) catch {
+                std.debug.print("Error: invalid opacity value: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+            if (is_vignette) {
+                config.max_alpha = val;
+            } else {
+                config.mask_opacity = val;
+            }
         } else {
             std.debug.print("Error: unknown argument: {s}\n", .{arg});
-            try printHelp(args[0]);
+            try printHelp(args[0], null);
             std.process.exit(1);
         }
     }
-
     return config;
 }
 
 pub fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
-    var buf: [512]u8 = undefined;
-
-    var stdout_writer = std.fs.File.stdout().writer(&buf);
-    const stdout = &stdout_writer.interface;
-
-    try stdout.print(fmt, args);
-
-    try stdout.flush();
+    var buf: [1024]u8 = undefined;
+    var buffered_writer = std.fs.File.stdout().writer(&buf);
+    const writer = &buffered_writer.interface;
+    try writer.print(fmt, args);
+    try writer.flush();
 }
 
 pub fn main() !void {
@@ -581,43 +735,46 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const config = try parseArgs(allocator);
+    const config = parseArgs(allocator) catch |err| {
+        std.debug.print("Failed to parse arguments: {}\n", .{err});
+        std.process.exit(1);
+    };
 
-    var message = std.ArrayList(u8).empty;
-    defer message.deinit(allocator);
-
-    var writer = message.writer(allocator);
-
-    try message.appendSlice(allocator, "Running with opacity: ");
-    try writer.print("{d}", .{config.max_alpha});
-    try message.appendSlice(allocator, ", falloff power: ");
-    try writer.print("{d}", .{config.falloff});
-    try message.appendSlice(allocator, ", falloff function: ");
-    try message.appendSlice(allocator, @tagName(config.falloff_type));
-    try message.appendSlice(allocator, ", shape: ");
-    try message.appendSlice(allocator, @tagName(config.shape));
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer_impl = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer_impl.interface;
+    try stdout.print("Running in {s}", .{@tagName(config.mode)});
+    if (config.mode == .pixel) {
+        try stdout.print(", mask pattern: {s}", .{@tagName(config.mask_pattern)});
+        try stdout.print(", mask size: {d}", .{config.mask_size});
+        try stdout.print(", mask opacity: {}", .{config.mask_opacity});
+    }
+    if (config.mode == .vignette) {
+        try stdout.print(", stripe width: {d}", .{config.stripe_width});
+        try stdout.print(", stripe opacity: {}", .{config.stripe_opacity});
+        try stdout.print(", opacity: {}", .{config.max_alpha});
+        try stdout.print(", falloff power: {}", .{config.falloff});
+        try stdout.print(", falloff function: {s}", .{@tagName(config.falloff_type)});
+        try stdout.print(", shape: {s}", .{@tagName(config.shape)});
+    }
     if (config.left_bias) |bias| {
-        try message.appendSlice(allocator, ", left bias: ");
-        try writer.print("{d}", .{bias});
+        try stdout.print(", left bias: {}", .{bias});
     }
     if (config.right_bias) |bias| {
-        try message.appendSlice(allocator, ", right bias: ");
-        try writer.print("{d}", .{bias});
-    }
-    if (config.stripe_width > 0) {
-        try message.appendSlice(allocator, ", stripe width: ");
-        try writer.print("{d}", .{config.stripe_width});
-        try message.appendSlice(allocator, ", stripe opacity: ");
-        try writer.print("{d}", .{config.stripe_opacity});
+        try stdout.print(", right bias: {}", .{bias});
     }
     if (config.invert) {
-        try message.appendSlice(allocator, ", invert: true");
+        try stdout.print(", invert: true", .{});
     }
-    try stdoutPrint("{s}\n", .{message.items});
+    try stdout.print("\n", .{});
+    try stdout.flush();
 
     _ = windows.SetConsoleCtrlHandler(windows.windowsCtrlHandler, 1);
 
-    try createVignetteWindows(allocator, config);
+    createVignetteWindows(allocator, config) catch |err| {
+        try stdoutPrint("Error: {}\n", .{err});
+        std.process.exit(1);
+    };
 
     try stdoutPrint("Closing...", .{});
 }
