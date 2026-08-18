@@ -119,6 +119,12 @@ const windows = if (builtin.os.tag == .windows) struct {
     extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) BOOL;
     extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) LRESULT;
     extern "user32" fn PostQuitMessage(nExitCode: i32) callconv(.winapi) void;
+    extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
+    const SW_HIDE: i32 = 0;
+    const SW_SHOW: i32 = 5;
+    const SW_MINIMIZE: i32 = 6;
+    const SW_RESTORE: i32 = 9;
+    const WM_CLOSE: UINT = 0x0010;
     extern "user32" fn GetDC(hWnd: ?HWND) callconv(.winapi) ?HDC;
     extern "user32" fn ReleaseDC(hWnd: ?HWND, hDC: HDC) callconv(.winapi) i32;
     extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) isize;
@@ -296,14 +302,21 @@ const windows = if (builtin.os.tag == .windows) struct {
     const GWL_EXSTYLE: i32 = -20;
     const WM_DESTROY: UINT = 0x0002;
     const WM_COMMAND: UINT = 0x0111;
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_RBUTTONUP: u32 = 0x0205;
     const BI_RGB: u32 = 0;
     const DIB_RGB_COLORS: u32 = 0;
     const ULW_ALPHA: u32 = 0x00000002;
 } else struct {};
 
 fn windowProc(hWnd: windows.HWND, uMsg: windows.UINT, wParam: windows.WPARAM, lParam: windows.LPARAM) callconv(.winapi) windows.LRESULT {
+    if (uMsg == windows.WM_CLOSE) {
+        // 关闭窗口时隐藏到托盘，继续在后台运行
+        _ = windows.ShowWindow(hWnd, windows.SW_HIDE);
+        return 0;
+    }
     if (uMsg == windows.WM_DESTROY) {
-        windows.PostQuitMessage(0);
+        // 防止窗口被销毁，保持后台运行
         return 0;
     }
     return windows.DefWindowProcW(hWnd, uMsg, wParam, lParam);
@@ -517,11 +530,13 @@ fn createVignetteWindows(allocator: std.mem.Allocator, config: Config) !void {
             mon.x, mon.y, mon.width, mon.height,
             null, null, hInstance, null,
         ) orelse continue;
+        if (main_hwnd == null) main_hwnd = hwnd;
         drawVignetteWindows(hwnd, @intCast(mon.width), @intCast(mon.height), mon.x, mon.y, config) catch continue;
     }
 }
 
 var tray_hwnd: ?windows.HWND = null;
+var main_hwnd: ?windows.HWND = null;
 
 var should_quit = std.atomic.Value(bool).init(false);
 var quit_event: ?*anyopaque = null;
@@ -618,9 +633,18 @@ pub fn main() !void {
             } else if (msg.message == windows.WM_QUIT) {
                 should_quit.store(true, .monotonic);
             } else if (msg.message == 1024) {
-                // Tray icon interaction (right-click or activation) - show popup menu
-                if (tray_hwnd) |hw| {
-                    showPopupMenu(hw);
+                // 托盘图标交互：左键恢复窗口，右键显示菜单
+                const is_right = msg.lParam == @as(windows.LPARAM, @intCast(windows.WM_RBUTTONUP));
+                const is_left = msg.lParam == @as(windows.LPARAM, @intCast(windows.WM_LBUTTONUP));
+                if (is_left) {
+                    if (main_hwnd) |hw| {
+                        _ = windows.ShowWindow(hw, windows.SW_SHOW);
+                        std.debug.print("Tray: Window restored (left-click).\n", .{});
+                    }
+                } else if (is_right) {
+                    if (tray_hwnd) |hw| {
+                        showPopupMenu(hw);
+                    }
                 }
             } else if (msg.message == windows.WM_COMMAND) {
                 // Handle menu commands if any were added
@@ -655,6 +679,7 @@ const MENU_ID_OPACITY_UP = 1003;
 const MENU_ID_OPACITY_DOWN = 1004;
 const MENU_ID_STRIPE_TOGGLE = 1005;
 const MENU_ID_FULL_SCREEN = 1007;
+const MENU_ID_SHOW = 1008;
 const MENU_ID_EXIT = 1006;
 
 fn showPopupMenu(hwnd: windows.HWND) void {
@@ -676,6 +701,7 @@ fn showPopupMenu(hwnd: windows.HWND) void {
         _ = windows.AppendMenuW(hMenu, windows.MF_POPUP, @as(usize, @intFromPtr(hSubMenu.?)), windows.L("View Settings"));
     }
     _ = windows.AppendMenuW(hMenu, windows.MF_SEPARATOR, 0, null);
+    _ = windows.AppendMenuW(hMenu, windows.MF_STRING, MENU_ID_SHOW, windows.L("Show Window"));
     _ = windows.AppendMenuW(hMenu, windows.MF_STRING, MENU_ID_EXIT, windows.L("Exit"));
 
     const flags = windows.TPM_RETURNCMD | windows.TPM_RIGHTBUTTON | windows.TPM_BOTTOMALIGN;
@@ -713,6 +739,12 @@ fn handleMenuCommand(cmd: u16) void {
         MENU_ID_FULL_SCREEN => {
             interactive_config.full_screen_cover = !interactive_config.full_screen_cover;
             std.debug.print("Tray: Full screen privacy toggled to {}\n", .{interactive_config.full_screen_cover});
+        },
+        MENU_ID_SHOW => {
+            if (main_hwnd) |hw| {
+                _ = windows.ShowWindow(hw, windows.SW_SHOW);
+                std.debug.print("Tray: Window restored.\n", .{});
+            }
         },
         MENU_ID_EXIT => {
             std.debug.print("Tray: Exit selected. Closing...\n", .{});
