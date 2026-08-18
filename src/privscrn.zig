@@ -90,11 +90,12 @@ const windows = if (builtin.os.tag == .windows) struct {
         HandlerRoutine: ?*const fn (dwCtrlType: u32) callconv(.winapi) i32,
         Add: i32,
     ) callconv(.winapi) i32;
+    extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?HWND;
 
     fn windowsCtrlHandler(dwCtrlType: u32) callconv(.winapi) i32 {
+        // 关闭控制台时不退出，继续在托盘后台运行（由托盘菜单或系统控制退出）
         _ = dwCtrlType;
-        should_quit.store(true, .monotonic);
-        if (quit_event) |e| _ = windows.SetEvent(e);
+        // 不设置 should_quit，保持后台运行
         return 1;
     }
 
@@ -564,8 +565,11 @@ pub fn main() !void {
     interactive_config = config;
     interactive_enabled.store(true, .monotonic);
 
-    // 管理员运行时防止乱码：设置控制台为 UTF-8
+    // 管理员运行时防止乱码：设置控制台为 UTF-8，并隐藏控制台窗口（托盘后台运行，无控制台可见）
     _ = windows.SetConsoleOutputCP(65001);
+    if (windows.GetConsoleWindow()) |cw| {
+        _ = windows.ShowWindow(cw, windows.SW_HIDE);
+    }
 
     // 自动识别屏幕：启动时检测所有显示器并根据尺寸自动增强真实防窥强度
     var screens = detectScreens(allocator) catch std.ArrayListUnmanaged(ScreenDetail).empty;
